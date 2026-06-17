@@ -696,6 +696,18 @@ def main():
     print(f"Posiciones: {positions}")
     print(f"Modo: {'SIMULADO' if simulate else 'REAL'}")
 
+    if args.max_loops == 0:
+        s = input("¿Cuántos bucles quieres ejecutar? (Enter = infinito): ").strip()
+        if s:
+            try:
+                args.max_loops = max(0, int(s))
+            except ValueError:
+                args.max_loops = 0
+        if args.max_loops > 0:
+            print(f"Se ejecutarán {args.max_loops} bucle(s) máximo.")
+        else:
+            print("Modo infinito (se detiene con F6 o Esc).")
+
     if not simulate:
         print(
             "ADVERTENCIA: se habilitarán clics reales. Asegúrate de que el cursor esté en una zona segura."
