@@ -32,7 +32,7 @@ from pynput import keyboard
 try:
     import queue
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import messagebox, ttk
 except Exception:
     tk = None
     queue = None
@@ -116,15 +116,21 @@ def on_press(key):
 
 
 def click_loop(
-    positions_list, global_interval, simulate, randomize=False, log_fn=print
+    positions_list, global_interval, simulate, order_mode="secuencial", log_fn=print
 ):
     global running, clicking, last_click_times
     log_fn(
         "Hilo de clics iniciado. Usa el botón Iniciar/Detener o F6 para controlar, Esc para salir (CLI)."
     )
+    loop_count = 0
+    last_clicked = None
     while running:
         if clicking:
+            loop_count += 1
             now = time.time()
+            log_fn(
+                f"[BUCLE {loop_count}] Ejecutando {len(positions_list)} posiciones (modo={order_mode})"
+            )
             # Construir lista de posiciones habilitadas
             entries = [
                 (n, info)
@@ -135,9 +141,19 @@ def click_loop(
                 time.sleep(0.1)
                 continue
             names = [n for n, _ in entries]
-            if randomize:
+            mode = str(order_mode).lower() if order_mode else "secuencial"
+            if mode == "aleatorio":
                 names_iter = list(names)
                 random.shuffle(names_iter)
+            elif mode == "evitar_consecutivo":
+                names_iter = list(names)
+                random.shuffle(names_iter)
+                if (
+                    last_clicked is not None
+                    and len(names_iter) > 1
+                    and names_iter[0] == last_clicked
+                ):
+                    names_iter[0], names_iter[1] = names_iter[1], names_iter[0]
             else:
                 names_iter = names
             for name in names_iter:
@@ -162,10 +178,12 @@ def click_loop(
                     log_fn(
                         f"[SIMULADO] CLIC {name} en ({tx},{ty}) (cooldown={cooldown}s)"
                     )
+                    last_clicked = name
                 else:
                     try:
                         pyautogui.click(tx, ty, button=button)
                         log_fn(f"[CLIC] {name} en ({tx},{ty}) (boton={button})")
+                        last_clicked = name
                     except Exception as e:
                         log_fn(f"[ERROR] No se pudo clicar {name} en ({tx},{ty}): {e}")
                 last_click_times[(name, x, y)] = time.time()
@@ -208,7 +226,13 @@ def main():
     parser.add_argument(
         "--randomize",
         action="store_true",
-        help="Ejecutar las posiciones en orden aleatorio cada pasada (sin repetición dentro de la pasada)",
+        help="(deprecated) Ejecutar las posiciones en orden aleatorio cada pasada",
+    )
+    parser.add_argument(
+        "--order-mode",
+        choices=("secuencial", "aleatorio", "evitar_consecutivo"),
+        default="secuencial",
+        help="Modo de orden de posiciones: 'secuencial', 'aleatorio' (por pasada), 'evitar_consecutivo' (evita repetir la misma posición al inicio de la pasada)",
     )
     args = parser.parse_args()
 
@@ -434,11 +458,19 @@ def main():
             row=1, column=4, padx=4
         )
 
-        # Orden aleatorio entre posiciones
-        random_order_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(ctrl, text="Orden aleatorio", variable=random_order_var).grid(
-            row=1, column=5, padx=8
-        )
+        # Modo de orden entre posiciones
+        order_mode_var = tk.StringVar(value="secuencial")
+        ttk.Combobox(
+            ctrl,
+            textvariable=order_mode_var,
+            values=("secuencial", "aleatorio", "evitar_consecutivo"),
+            width=26,
+        ).grid(row=1, column=5, padx=8)
+
+        # Contador de bucle
+        loop_count = [0]
+        lbl_loop = tk.Label(ctrl, text="Bucle: 0")
+        lbl_loop.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
 
         log_text = tk.Text(right)
         log_text.pack(fill=tk.BOTH, expand=True)
@@ -446,12 +478,22 @@ def main():
         thread = None
         stop_event = threading.Event()
         running_flag = [False]
+        last_clicked_name = [None]
 
         def pos_click_loop():
             last_clicks = {}
             while not stop_event.is_set():
                 if running_flag[0]:
                     now = time.time()
+                    # Incrementar contador de bucle y actualizar UI
+                    try:
+                        loop_count[0] += 1
+                        root.after(
+                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}")
+                        )
+                    except Exception:
+                        pass
+
                     # Construir orden de iteración (posiciones habilitadas)
                     active_names = [
                         n
@@ -461,11 +503,27 @@ def main():
                     if not active_names:
                         time.sleep(0.1)
                         continue
-                    if bool(random_order_var.get()):
+
+                    mode = order_mode_var.get() if order_mode_var else "secuencial"
+                    if mode == "aleatorio":
                         names_iter = list(active_names)
                         random.shuffle(names_iter)
+                    elif mode == "evitar_consecutivo":
+                        names_iter = list(active_names)
+                        random.shuffle(names_iter)
+                        try:
+                            last_clicked = last_clicked_name[0]
+                        except Exception:
+                            last_clicked = None
+                        if (
+                            last_clicked is not None
+                            and len(names_iter) > 1
+                            and names_iter[0] == last_clicked
+                        ):
+                            names_iter[0], names_iter[1] = names_iter[1], names_iter[0]
                     else:
                         names_iter = active_names
+
                     for name in names_iter:
                         info = positions.get(name, {})
                         if not info.get("enabled", True):
@@ -488,12 +546,20 @@ def main():
                             enqueue_log(
                                 f"[SIMULADO] CLIC {name} en ({tx},{ty}) (cooldown={cooldown}s)"
                             )
+                            try:
+                                last_clicked_name[0] = name
+                            except Exception:
+                                pass
                         else:
                             try:
                                 pyautogui.click(tx, ty, button=button)
                                 enqueue_log(
                                     f"[CLIC] {name} en ({tx},{ty}) (boton={button})"
                                 )
+                                try:
+                                    last_clicked_name[0] = name
+                                except Exception:
+                                    pass
                             except Exception as e:
                                 enqueue_log(
                                     f"[ERROR] No se pudo clicar {name} en ({tx},{ty}): {e}"
@@ -610,9 +676,14 @@ def main():
         time.sleep(args.countdown)
 
     # Start background thread
+    # Determinar modo de orden (compatibilidad con --randomize)
+    order_mode = args.order_mode
+    if args.randomize:
+        order_mode = "aleatorio"
+
     t = threading.Thread(
         target=click_loop,
-        args=(positions, args.interval, simulate, args.randomize, print),
+        args=(positions, args.interval, simulate, order_mode, print),
         daemon=True,
     )
     t.start()

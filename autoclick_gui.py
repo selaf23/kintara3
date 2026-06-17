@@ -308,7 +308,9 @@ class Scanner:
         ts = time.strftime("%H:%M:%S")
         self.log_fn(f"[{ts}] {msg}")
 
-    def find_and_click_once(self, target_images: List[str], cfg: Dict[str, Any]):
+    def find_and_click_once(
+        self, target_images: List[str], cfg: Dict[str, Any], scan_idx: int | None = None
+    ):
         now = time.time()
         for img in target_images:
             confidence = get_target_setting(
@@ -317,11 +319,19 @@ class Scanner:
             matches = locate_all(
                 img, confidence, simulate=self.simulate, demo=self.demo
             )
-            if not matches:
+            basename = os.path.basename(img)
+            if matches:
+                self.log(
+                    f"[BUCLE {scan_idx}] ENCONTRADO {basename}: {len(matches)} coincidencia(s) (conf={confidence})"
+                )
+            else:
+                self.log(
+                    f"[BUCLE {scan_idx}] NO_ENCONTRADO {basename} (conf={confidence})"
+                )
                 continue
+
             for m in matches:
                 cx, cy = center_of(m)
-                basename = os.path.basename(img)
                 key = (basename, cx, cy)
 
                 click_cooldown = get_target_setting(
@@ -384,13 +394,16 @@ class Scanner:
 
     def scan_loop(self):
         self.log("Hilo de escaneo iniciado")
+        self.scan_count = 0
         while self.running:
+            self.scan_count += 1
             cfg = load_targets_config(self.targets_dir)
             imgs = list_target_images(self.targets_dir)
             if not imgs and not self.demo:
                 self.log(f"No se encontraron imágenes objetivo en {self.targets_dir}")
             else:
-                self.find_and_click_once(imgs, cfg)
+                self.log(f"[BUCLE {self.scan_count}] Escaneo de {len(imgs)} imagen(es)")
+                self.find_and_click_once(imgs, cfg, scan_idx=self.scan_count)
             time.sleep(self.scan_interval)
         self.log("Hilo de escaneo detenido")
 
@@ -980,11 +993,23 @@ class AutoclickGUI:
             row=1, column=4, padx=4
         )
 
-        # Orden aleatorio entre posiciones
-        random_order_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(ctrl, text="Orden aleatorio", variable=random_order_var).grid(
-            row=1, column=5, padx=8
-        )
+        # Modo de orden entre posiciones
+        order_mode_var = tk.StringVar(value="Secuencial")
+        ttk.Combobox(
+            ctrl,
+            textvariable=order_mode_var,
+            values=(
+                "Secuencial",
+                "Aleatorio por pasada",
+                "Evitar repetición consecutiva",
+            ),
+            width=26,
+        ).grid(row=1, column=5, padx=8)
+
+        # Contador de bucle
+        loop_count = [0]
+        lbl_loop = tk.Label(ctrl, text="Bucle: 0")
+        lbl_loop.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
 
         log_text = tk.Text(right)
         log_text.pack(fill=tk.BOTH, expand=True)
@@ -1014,12 +1039,23 @@ class AutoclickGUI:
         thread = None
         stop_event = threading.Event()
         running_flag = [False]
+        last_clicked_name = [None]
 
         def pos_click_loop():
             last_clicks = {}
             while not stop_event.is_set():
                 if running_flag[0]:
                     now = time.time()
+
+                    # Incrementar contador de bucle y actualizar UI
+                    try:
+                        loop_count[0] += 1
+                        win.after(
+                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}")
+                        )
+                    except Exception:
+                        pass
+
                     # Construir orden de iteración (posiciones habilitadas)
                     active_names = [
                         n
@@ -1029,11 +1065,32 @@ class AutoclickGUI:
                     if not active_names:
                         time.sleep(0.1)
                         continue
-                    if bool(random_order_var.get()):
+
+                    mode = order_mode_var.get() if order_mode_var else "Secuencial"
+                    mode_key = str(mode).lower()
+                    if mode_key in ("aleatorio", "aleatorio por pasada"):
                         names_iter = list(active_names)
                         random.shuffle(names_iter)
+                    elif mode_key in (
+                        "evitar repetición consecutiva",
+                        "evitar_consecutivo",
+                    ):
+                        names_iter = list(active_names)
+                        random.shuffle(names_iter)
+                        try:
+                            last_clicked = last_clicked_name[0]
+                        except Exception:
+                            last_clicked = None
+                        if (
+                            last_clicked is not None
+                            and len(names_iter) > 1
+                            and names_iter[0] == last_clicked
+                        ):
+                            # intercambiar con la siguiente para evitar repetición consecutiva
+                            names_iter[0], names_iter[1] = names_iter[1], names_iter[0]
                     else:
                         names_iter = active_names
+
                     for name in names_iter:
                         info = positions.get(name, {})
                         if not info.get("enabled", True):
@@ -1044,28 +1101,36 @@ class AutoclickGUI:
                         jitter = int(info.get("jitter", 0))
                         button = info.get("button", "left")
                         last = last_clicks.get((name, x, y), 0)
-                        if now - last < cooldown:
+                        if time.time() - last < cooldown:
                             continue
-                        jx = 0
-                        jy = 0
-                        if jitter:
-                            jx = random.randint(-jitter, jitter)
-                            jy = random.randint(-jitter, jitter)
+                        jx = random.randint(-jitter, jitter) if jitter else 0
+                        jy = random.randint(-jitter, jitter) if jitter else 0
                         tx, ty = x + jx, y + jy
+
                         if bool(sim_var.get()):
                             enqueue_log(
                                 f"[SIMULADO] CLIC {name} en ({tx},{ty}) (cooldown={cooldown}s)"
                             )
+                            # registrar la última posición clicada
+                            try:
+                                last_clicked_name[0] = name
+                            except Exception:
+                                pass
                         else:
                             try:
                                 pyautogui.click(tx, ty, button=button)
                                 enqueue_log(
                                     f"[CLIC] {name} en ({tx},{ty}) (boton={button})"
                                 )
+                                try:
+                                    last_clicked_name[0] = name
+                                except Exception:
+                                    pass
                             except Exception as e:
                                 enqueue_log(
                                     f"[ERROR] No se pudo clicar {name} en ({tx},{ty}): {e}"
                                 )
+
                         last_clicks[(name, x, y)] = time.time()
                         # Retardo entre posiciones (global o por posición)
                         try:
@@ -1076,9 +1141,11 @@ class AutoclickGUI:
                         except Exception:
                             delay_between = float(info.get("click_delay", 0.05))
                         time.sleep(delay_between)
+
                     time.sleep(float(interval_var.get()))
                 else:
                     time.sleep(0.1)
+
             enqueue_log("Hilo de clics detenido")
 
         def start_clicking():

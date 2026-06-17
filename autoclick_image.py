@@ -239,6 +239,7 @@ def find_and_click_once(
     global_click_cooldown: float,
     global_button: str,
     cfg: Dict[str, Any],
+    scan_idx: int | None = None,
 ):
     global last_click_times
 
@@ -247,12 +248,17 @@ def find_and_click_once(
     for img in target_images:
         confidence = get_target_setting(img, cfg, "confidence", global_confidence)
         matches = locate_all(img, confidence)
-        if not matches:
+        basename = os.path.basename(img)
+        if matches:
+            print(
+                f"[BUCLE {scan_idx}] ENCONTRADO {basename}: {len(matches)} coincidencia(s) (conf={confidence})"
+            )
+        else:
+            print(f"[BUCLE {scan_idx}] NO_ENCONTRADO {basename} (conf={confidence})")
             continue
 
         for m in matches:
             cx, cy = center_of(m)
-            basename = os.path.basename(img)
             key = (basename, cx, cy)
 
             click_cooldown = get_target_setting(
@@ -315,8 +321,10 @@ def scan_loop(
 ):
     global running, clicking
 
+    scan_count = 0
     while running:
         if clicking:
+            scan_count += 1
             cfg = load_targets_config(targets_dir)
             target_images = list_target_images(targets_dir)
             if not target_images:
@@ -324,6 +332,9 @@ def scan_loop(
                     f"[AVISO] No se encontraron imágenes objetivo en {targets_dir}. Añade archivos PNG/JPG allí."
                 )
             else:
+                print(
+                    f"[BUCLE {scan_count}] Escaneo de {len(target_images)} imagen(es)"
+                )
                 find_and_click_once(
                     target_images,
                     confidence,
@@ -332,6 +343,7 @@ def scan_loop(
                     click_cooldown,
                     button,
                     cfg,
+                    scan_idx=scan_count,
                 )
 
             time.sleep(scan_interval)
