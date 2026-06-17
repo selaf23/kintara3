@@ -1037,6 +1037,9 @@ class AutoclickGUI:
         tk.Label(ctrl, text="Cuenta regresiva: ").grid(row=1, column=0)
         count_var = tk.IntVar(value=int(self.countdown_var.get()))
         tk.Entry(ctrl, textvariable=count_var, width=6).grid(row=1, column=1)
+        tk.Label(ctrl, text="Máx. bucles (0=inf):").grid(row=2, column=0, sticky=tk.W)
+        max_loops_var = tk.IntVar(value=0)
+        tk.Entry(ctrl, textvariable=max_loops_var, width=6).grid(row=2, column=1, sticky=tk.W)
 
         # Retardo entre posiciones (global o por posición)
         tk.Label(ctrl, text="Retardo entre posiciones (s):").grid(
@@ -1080,8 +1083,17 @@ class AutoclickGUI:
 
         # Contador de bucle
         loop_count = [0]
-        lbl_loop = tk.Label(ctrl, text="Bucle: 0")
-        lbl_loop.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
+        max_lbl_str = tk.StringVar(value="∞")
+        lbl_loop = tk.Label(ctrl, text="Bucle: 0/∞")
+        lbl_loop.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
+
+        def refresh_max_label():
+            ml = max_loops_var.get()
+            max_lbl_str.set(str(ml) if ml > 0 else "∞")
+            loop_count_val = loop_count[0] if loop_count else 0
+            lbl_loop.config(text=f"Bucle: {loop_count_val}/{max_lbl_str.get()}")
+            win.after(500, refresh_max_label)
+        refresh_max_label()
 
         log_text = tk.Text(right)
         log_text.pack(fill=tk.BOTH, expand=True)
@@ -1122,8 +1134,15 @@ class AutoclickGUI:
                     # Incrementar contador de bucle y actualizar UI
                     try:
                         loop_count[0] += 1
+                        ml = max_loops_var.get()
+                        if ml > 0 and loop_count[0] > ml:
+                            enqueue_log(f"[INFO] Límite de {ml} bucle(s) alcanzado. Deteniendo.")
+                            running_flag[0] = False
+                            stop_event.set()
+                            break
+                        max_str = str(ml) if ml > 0 else "∞"
                         win.after(
-                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}")
+                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}/{max_str}")
                         )
                     except Exception:
                         pass

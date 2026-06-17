@@ -116,7 +116,7 @@ def on_press(key):
 
 
 def click_loop(
-    positions_list, global_interval, simulate, order_mode="secuencial", log_fn=print
+    positions_list, global_interval, simulate, order_mode="secuencial", log_fn=print, max_loops=0
 ):
     global running, clicking, last_click_times
     log_fn(
@@ -127,6 +127,11 @@ def click_loop(
     while running:
         if clicking:
             loop_count += 1
+            if max_loops > 0 and loop_count > max_loops:
+                log_fn(f"[INFO] Límite de {max_loops} bucle(s) alcanzado. Deteniendo.")
+                clicking = False
+                running = False
+                break
             now = time.time()
             log_fn(
                 f"[BUCLE {loop_count}] Ejecutando {len(positions_list)} posiciones (modo={order_mode})"
@@ -233,6 +238,12 @@ def main():
         choices=("secuencial", "aleatorio", "evitar_consecutivo"),
         default="secuencial",
         help="Modo de orden de posiciones: 'secuencial', 'aleatorio' (por pasada), 'evitar_consecutivo' (evita repetir la misma posición al inicio de la pasada)",
+    )
+    parser.add_argument(
+        "--max-loops",
+        type=int,
+        default=0,
+        help="Número máximo de bucles antes de detenerse (0 = infinito, por defecto)",
     )
     args = parser.parse_args()
 
@@ -430,6 +441,9 @@ def main():
         tk.Label(ctrl, text="Cuenta regresiva: ").grid(row=1, column=0)
         count_var = tk.IntVar(value=args.countdown)
         tk.Entry(ctrl, textvariable=count_var, width=6).grid(row=1, column=1)
+        tk.Label(ctrl, text="Máx. bucles (0=inf):").grid(row=2, column=0, sticky=tk.W)
+        max_loops_var = tk.IntVar(value=args.max_loops)
+        tk.Entry(ctrl, textvariable=max_loops_var, width=6).grid(row=2, column=1, sticky=tk.W)
 
         # Retardo entre posiciones (global o por posición)
         tk.Label(ctrl, text="Retardo entre posiciones (s):").grid(
@@ -469,8 +483,15 @@ def main():
 
         # Contador de bucle
         loop_count = [0]
-        lbl_loop = tk.Label(ctrl, text="Bucle: 0")
-        lbl_loop.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=4)
+        lbl_loop = tk.Label(ctrl, text="Bucle: 0/∞")
+        lbl_loop.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
+
+        def update_loop_label():
+            max_l = max_loops_var.get()
+            max_str = str(max_l) if max_l > 0 else "∞"
+            lbl_loop.config(text=f"Bucle: {loop_count[0]}/{max_str}")
+            root.after(500, update_loop_label)
+        update_loop_label()
 
         log_text = tk.Text(right)
         log_text.pack(fill=tk.BOTH, expand=True)
@@ -488,8 +509,15 @@ def main():
                     # Incrementar contador de bucle y actualizar UI
                     try:
                         loop_count[0] += 1
+                        max_l = max_loops_var.get()
+                        if max_l > 0 and loop_count[0] > max_l:
+                            enqueue_log(f"[INFO] Límite de {max_l} bucle(s) alcanzado. Deteniendo.")
+                            running_flag[0] = False
+                            stop_event.set()
+                            break
+                        max_str = str(max_l) if max_l > 0 else "∞"
                         root.after(
-                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}")
+                            0, lambda: lbl_loop.config(text=f"Bucle: {loop_count[0]}/{max_str}")
                         )
                     except Exception:
                         pass
@@ -683,7 +711,7 @@ def main():
 
     t = threading.Thread(
         target=click_loop,
-        args=(positions, args.interval, simulate, order_mode, print),
+        args=(positions, args.interval, simulate, order_mode, print, args.max_loops),
         daemon=True,
     )
     t.start()
