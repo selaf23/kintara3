@@ -697,16 +697,15 @@ def main():
     print(f"Modo: {'SIMULADO' if simulate else 'REAL'}")
 
     if args.max_loops == 0:
-        s = input("¿Cuántos bucles quieres ejecutar? (Enter = infinito): ").strip()
+        s = input("¿Cuántos bucles? (Enter = 60): ").strip()
         if s:
             try:
-                args.max_loops = max(0, int(s))
+                args.max_loops = max(1, int(s))
             except ValueError:
-                args.max_loops = 0
-        if args.max_loops > 0:
-            print(f"Se ejecutarán {args.max_loops} bucle(s) máximo.")
+                args.max_loops = 60
         else:
-            print("Modo infinito (se detiene con F6 o Esc).")
+            args.max_loops = 60
+        print(f"Se ejecutarán {args.max_loops} bucle(s) máximo.")
 
     if not simulate:
         print(
