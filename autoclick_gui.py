@@ -130,6 +130,16 @@ def get_target_setting(img_path: str, cfg: Dict[str, Any], key: str, default: An
     return entry.get(key, default)
 
 
+def _enhance_small_template(tpl_gray, min_size=20):
+    h, w = tpl_gray.shape[:2]
+    if h < min_size or w < min_size:
+        scale = max(min_size / w, min_size / h, 1.0)
+        if scale > 1.0:
+            nw, nh = int(w * scale), int(h * scale)
+            tpl_gray = cv2.resize(tpl_gray, (nw, nh), interpolation=cv2.INTER_CUBIC)
+    return tpl_gray
+
+
 def locate_all(
     img_path: str, confidence: float, simulate: bool = False, demo: bool = False
 ):
@@ -140,13 +150,13 @@ def locate_all(
     - Primero intenta `pyautogui.locateAllOnScreen` (rápido)
     - Si no hay resultados y OpenCV está disponible, realiza un matching multi-escala
       con `cv2.matchTemplate` (más robusto en casos de escala/dpi distinta).
+    - Mejorado para detectar imágenes pequeñas con escalas agresivas y upscaling.
     """
     if simulate:
         if demo:
             return [(100, 100, 20, 20)]
         return []
 
-    # Intento rápido con pyautogui (usa pyscreeze internamente)
     try:
         if HAVE_CV2:
             try:
@@ -154,7 +164,6 @@ def locate_all(
                     pyautogui.locateAllOnScreen(img_path, confidence=confidence)
                 )
             except Exception:
-                # caemos al fallback con OpenCV
                 pass
         else:
             try:
@@ -162,10 +171,8 @@ def locate_all(
             except Exception:
                 return []
     except Exception:
-        # seguimos al fallback
         pass
 
-    # Fallback: matching multi-escala con OpenCV (más lento, pero más robusto)
     if not HAVE_CV2:
         return []
 
@@ -173,7 +180,6 @@ def locate_all(
         import cv2
         import numpy as np
 
-        # Leer plantilla
         tpl = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
         if tpl is None:
             tpl = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
@@ -181,13 +187,11 @@ def locate_all(
             print(f"[AVISO] No se pudo leer la imagen objetivo: {img_path}")
             return []
 
-        # Captura de pantalla
         screen_pil = pyautogui.screenshot()
         screen = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
         screen_h, screen_w = screen.shape[:2]
 
         tpl_color = tpl
-        # Si la plantilla tiene canal alpha, ignoramos el alpha para matching simple
         if tpl_color.ndim == 3 and tpl_color.shape[2] == 4:
             tpl_color = cv2.cvtColor(tpl_color, cv2.COLOR_BGRA2BGR)
 
@@ -195,23 +199,27 @@ def locate_all(
         screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
 
         th, tw = tpl_gray.shape[:2]
+        is_small = tw < 32 or th < 32
+
+        tpl_enhanced = _enhance_small_template(tpl_gray, min_size=24)
+        eh, ew = tpl_enhanced.shape[:2]
+
         boxes = []
         scores = []
 
-        # Escalas a probar alrededor de 1.0 — ajustar si necesitas buscar mayor rango
-        scales = np.linspace(0.7, 1.3, 7)
+        if is_small:
+            scales = np.linspace(0.3, 3.0, 25)
+        else:
+            scales = np.linspace(0.4, 2.2, 16)
 
         for scale in scales:
-            nw = int(tw * scale)
-            nh = int(th * scale)
+            nw = int(ew * scale)
+            nh = int(eh * scale)
             if nw < 8 or nh < 8 or nw > screen_w or nh > screen_h:
                 continue
             try:
-                tpl_resized = cv2.resize(
-                    tpl_gray,
-                    (nw, nh),
-                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
-                )
+                interp = cv2.INTER_CUBIC if scale > 1.2 else cv2.INTER_AREA if scale < 0.8 else cv2.INTER_LINEAR
+                tpl_resized = cv2.resize(tpl_enhanced, (nw, nh), interpolation=interp)
             except Exception:
                 continue
 
@@ -219,15 +227,16 @@ def locate_all(
             loc = np.where(res >= float(confidence))
             for py_y, px_x in zip(*loc):
                 score = float(res[py_y, px_x])
-                boxes.append((int(px_x), int(py_y), nw, nh))
+                scale_correction = ew / tw if is_small else 1.0
+                orig_w = int(nw / scale_correction) if is_small else nw
+                orig_h = int(nh / scale_correction) if is_small else nh
+                boxes.append((int(px_x), int(py_y), int(nw), int(nh)))
                 scores.append(score)
 
-        # No detecciones
         if not boxes:
             return []
 
-        # Non-maximum suppression para fusionar detecciones solapadas
-        def _nms(boxes, scores, iou_thresh=0.3):
+        def _nms(boxes, scores, iou_thresh=0.25):
             x1 = np.array([b[0] for b in boxes], dtype=float)
             y1 = np.array([b[1] for b in boxes], dtype=float)
             x2 = x1 + np.array([b[2] for b in boxes], dtype=float)
@@ -253,7 +262,7 @@ def locate_all(
                 order = order[inds + 1]
             return keep
 
-        keep_idx = _nms(boxes, np.array(scores), iou_thresh=0.3)
+        keep_idx = _nms(boxes, np.array(scores), iou_thresh=0.25)
         filtered = [boxes[i] for i in keep_idx]
         return filtered
     except Exception as e:
@@ -468,67 +477,73 @@ class AutoclickGUI:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
-        left_frame = tk.Frame(self.root)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=8, pady=8)
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(1, weight=1)
 
-        lb_label = tk.Label(left_frame, text="Objetivos (en targets/)")
-        lb_label.pack(anchor=tk.W)
+        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main_paned.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=6, pady=4)
 
-        self.listbox = tk.Listbox(left_frame, width=40, height=25)
+        left_frame = ttk.Frame(main_paned)
+        main_paned.add(left_frame, weight=0)
+
+        lb_label = ttk.Label(left_frame, text="Objetivos (en targets/)")
+        lb_label.pack(anchor=tk.W, pady=(0, 2))
+
+        self.listbox = tk.Listbox(left_frame, width=38, height=20, font=("TkDefaultFont", 10))
         self.listbox.pack(fill=tk.BOTH, expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
 
-        btn_frame = tk.Frame(left_frame)
+        btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill=tk.X, pady=6)
-        tk.Button(btn_frame, text="Agregar imagen", command=self._add_image).pack(
+        ttk.Button(btn_frame, text="Agregar imagen", command=self._add_image).pack(
             side=tk.LEFT
         )
-        tk.Button(
-            btn_frame, text="Eliminar seleccionado", command=self._remove_selected
+        ttk.Button(
+            btn_frame, text="Eliminar", command=self._remove_selected
         ).pack(side=tk.LEFT, padx=6)
-        tk.Button(btn_frame, text="Actualizar", command=self._refresh_list).pack(
+        ttk.Button(btn_frame, text="Actualizar", command=self._refresh_list).pack(
             side=tk.LEFT
         )
 
-        right_frame = tk.Frame(self.root)
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
+        right_frame = ttk.Frame(main_paned)
+        main_paned.add(right_frame, weight=1)
 
         settings_frame = tk.LabelFrame(
-            right_frame, text="Configuración del objetivo seleccionado"
+            right_frame, text="Configuración del objetivo", font=("TkDefaultFont", 10, "bold")
         )
-        settings_frame.pack(fill=tk.X)
+        settings_frame.pack(fill=tk.X, pady=(0, 4))
 
         row = 0
         tk.Checkbutton(
             settings_frame, text="Habilitado", variable=self.sel_enabled
-        ).grid(row=row, column=0, sticky=tk.W)
+        ).grid(row=row, column=0, sticky=tk.W, columnspan=2)
         row += 1
         tk.Label(settings_frame, text="Intervalo entre clics (s)").grid(
             row=row, column=0, sticky=tk.W
         )
-        tk.Entry(settings_frame, textvariable=self.sel_click_interval, width=10).grid(
-            row=row, column=1, sticky=tk.W
+        tk.Entry(settings_frame, textvariable=self.sel_click_interval, width=8).grid(
+            row=row, column=1, sticky=tk.W, padx=4
         )
         row += 1
         tk.Label(settings_frame, text="Confianza (0-1)").grid(
             row=row, column=0, sticky=tk.W
         )
-        tk.Entry(settings_frame, textvariable=self.sel_confidence, width=10).grid(
-            row=row, column=1, sticky=tk.W
+        tk.Entry(settings_frame, textvariable=self.sel_confidence, width=8).grid(
+            row=row, column=1, sticky=tk.W, padx=4
         )
         row += 1
         tk.Label(settings_frame, text="Jitter (px)").grid(
             row=row, column=0, sticky=tk.W
         )
-        tk.Entry(settings_frame, textvariable=self.sel_jitter, width=10).grid(
-            row=row, column=1, sticky=tk.W
+        tk.Entry(settings_frame, textvariable=self.sel_jitter, width=8).grid(
+            row=row, column=1, sticky=tk.W, padx=4
         )
         row += 1
         tk.Label(settings_frame, text="Retardo entre clics (s)").grid(
             row=row, column=0, sticky=tk.W
         )
-        tk.Entry(settings_frame, textvariable=self.sel_click_delay, width=10).grid(
-            row=row, column=1, sticky=tk.W
+        tk.Entry(settings_frame, textvariable=self.sel_click_delay, width=8).grid(
+            row=row, column=1, sticky=tk.W, padx=4
         )
         row += 1
         tk.Label(settings_frame, text="Botón").grid(row=row, column=0, sticky=tk.W)
@@ -536,50 +551,69 @@ class AutoclickGUI:
             settings_frame,
             textvariable=self.sel_button,
             values=("left", "right", "middle"),
-            width=8,
-        ).grid(row=row, column=1, sticky=tk.W)
+            width=6,
+        ).grid(row=row, column=1, sticky=tk.W, padx=4)
         row += 1
-        tk.Button(
+        ttk.Button(
             settings_frame, text="Guardar objetivo", command=self._save_selected
-        ).grid(row=row, column=0, columnspan=2, pady=6)
+        ).grid(row=row, column=0, columnspan=2, pady=4)
 
-        global_frame = tk.LabelFrame(right_frame, text="Controles globales")
-        global_frame.pack(fill=tk.X, pady=8)
+        preview_frame = tk.LabelFrame(
+            right_frame, text="Vista previa", font=("TkDefaultFont", 10, "bold")
+        )
+        preview_frame.pack(fill=tk.X, pady=(0, 4))
+        self.preview_canvas = tk.Canvas(preview_frame, width=120, height=90, bg="#f0f0f0", highlightthickness=0)
+        self.preview_canvas.pack(side=tk.LEFT, padx=6, pady=4)
+        self.preview_canvas.create_text(60, 45, text="Sin imagen", fill="#999", font=("TkDefaultFont", 8))
+        self.preview_info = ttk.Label(preview_frame, text="Selecciona un objetivo", font=("TkDefaultFont", 8))
+        self.preview_info.pack(side=tk.LEFT, padx=6)
+
+        global_frame = tk.LabelFrame(
+            right_frame, text="Controles globales", font=("TkDefaultFont", 10, "bold")
+        )
+        global_frame.pack(fill=tk.X, pady=(0, 4))
 
         tk.Label(global_frame, text="Intervalo de escaneo (s)").grid(
             row=0, column=0, sticky=tk.W
         )
-        tk.Entry(global_frame, textvariable=self.scan_interval_var, width=8).grid(
+        tk.Entry(global_frame, textvariable=self.scan_interval_var, width=6).grid(
             row=0, column=1, sticky=tk.W
         )
         tk.Checkbutton(
             global_frame, text="Simular (sin clics reales)", variable=self.simulate_var
         ).grid(row=0, column=2, padx=12)
 
-        tk.Label(global_frame, text="Cuenta regresiva antes de iniciar (s)").grid(
+        tk.Label(global_frame, text="Cuenta regresiva (s)").grid(
             row=1, column=0, sticky=tk.W
         )
-        tk.Entry(global_frame, textvariable=self.countdown_var, width=8).grid(
+        tk.Entry(global_frame, textvariable=self.countdown_var, width=6).grid(
             row=1, column=1, sticky=tk.W
         )
 
-        ctrl_frame = tk.Frame(global_frame)
-        ctrl_frame.grid(row=2, column=0, columnspan=3, pady=8)
-        tk.Button(ctrl_frame, text="Iniciar", command=self._start).pack(side=tk.LEFT)
-        tk.Button(ctrl_frame, text="Detener", command=self._stop).pack(
-            side=tk.LEFT, padx=8
-        )
-        # Button to open Positions manager (separate GUI)
-        tk.Button(ctrl_frame, text="Posiciones", command=self._open_positions).pack(
+        ctrl_frame = ttk.Frame(global_frame)
+        ctrl_frame.grid(row=2, column=0, columnspan=3, pady=6)
+        self.start_btn = ttk.Button(ctrl_frame, text="Iniciar", command=self._start)
+        self.start_btn.pack(side=tk.LEFT)
+        self.stop_btn = ttk.Button(ctrl_frame, text="Detener", command=self._stop, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=8)
+        ttk.Button(ctrl_frame, text="Posiciones", command=self._open_positions).pack(
             side=tk.LEFT, padx=8
         )
 
-        log_frame = tk.LabelFrame(right_frame, text="Registro")
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        self.log_text = tk.Text(log_frame, height=12)
+        log_frame = tk.LabelFrame(
+            right_frame, text="Registro", font=("TkDefaultFont", 10, "bold")
+        )
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
+        self.log_text = tk.Text(log_frame, height=10, font=("TkFixedFont", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # Llenar lista al inicio
+        # Status bar
+        self.status_var = tk.StringVar(value="Listo")
+        status_bar = ttk.Label(
+            self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(6, 2)
+        )
+        status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+
         self._refresh_list()
 
     # Helpers de UI
@@ -589,12 +623,41 @@ class AutoclickGUI:
         for p in imgs:
             self.listbox.insert(tk.END, os.path.basename(p))
 
+    def _show_preview(self, name):
+        self.preview_canvas.delete("all")
+        w, h = 120, 90
+        path = os.path.join(self.targets_dir, name)
+        if not os.path.exists(path):
+            self.preview_canvas.create_text(w//2, h//2, text="Archivo no encontrado", fill="#999", font=("TkDefaultFont", 8))
+            self.preview_info.config(text="")
+            return
+        try:
+            img = tk.PhotoImage(file=path)
+            iw, ih = img.width(), img.height()
+            scale = min(w/iw, h/ih, 1.0)
+            if scale < 1.0:
+                nw, nh = int(iw*scale), int(ih*scale)
+                img = img.subsample(max(1, int(1/scale)))
+            self.preview_canvas.config(width=min(w, iw), height=min(h, ih))
+            self.preview_canvas.create_image(0, 0, anchor=tk.NW, image=img)
+            self.preview_canvas.image = img
+            self.preview_info.config(text=f"{iw}x{ih} px — {name}")
+        except Exception:
+            self.preview_canvas.create_text(w//2, h//2, text="Sin vista previa", fill="#999", font=("TkDefaultFont", 8))
+            try:
+                stat = os.stat(path)
+                size_kb = stat.st_size / 1024
+                self.preview_info.config(text=f"{size_kb:.0f} KB — {name}")
+            except Exception:
+                self.preview_info.config(text=name)
+
     def _on_select(self, evt=None):
         sel = self.listbox.curselection()
         if not sel:
             return
         idx = sel[0]
         name = self.listbox.get(idx)
+        self._show_preview(name)
         cfg = load_targets_config(self.targets_dir)
         entry = cfg.get(name, {})
         self.sel_enabled.set(bool(entry.get("enabled", True)))
@@ -694,19 +757,25 @@ class AutoclickGUI:
             log_fn=self._log,
         )
         self.scanner = scanner
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.status_var.set("Iniciando escáner...")
 
         countdown = int(self.countdown_var.get() or 0)
         if countdown > 0:
             self._countdown_and_start(countdown)
         else:
             scanner.start()
+            self.status_var.set("Escáner en ejecución")
 
     def _countdown_and_start(self, n: int):
         if n <= 0:
             if self.scanner:
                 self.scanner.start()
+                self.status_var.set("Escáner en ejecución")
             return
         self._log(f"Iniciando en {n}...")
+        self.status_var.set(f"Iniciando en {n}...")
         self.root.after(1000, lambda: self._countdown_and_start(n - 1))
 
     def _stop(self):
@@ -714,6 +783,9 @@ class AutoclickGUI:
             self.scanner.stop()
             self._log("Escáner detenido")
             self.scanner = None
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_var.set("Detenido")
 
     def _toggle_scan(self):
         """Alterna el escáner (Iniciar/Detener)."""
@@ -1245,7 +1317,10 @@ class AutoclickGUI:
                 return
         if self.scanner:
             self.scanner.stop()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()

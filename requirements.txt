@@ -1,4 +1,5 @@
-pyautogui
-pynput
-opencv-python
-pyinstaller
+pyautogui>=0.9.50
+pynput>=1.7.6
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+pyinstaller>=6.0

@@ -157,4 +157,4 @@ Si necesitas ayuda
 
 ---
 
-Si quieres que actualice esto con más capturas o ejemplos concretos, dimelo y lo añado.
+Si quieres que actualice esto con más capturas o ejemplos concretos, dimelo y lo añado.# kintara3

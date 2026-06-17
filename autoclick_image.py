@@ -104,11 +104,22 @@ def load_targets_config(targets_dir: str) -> Dict[str, Any]:
         return {}
 
 
-def locate_all(img_path: str, confidence: float) -> List[pyautogui.Box]:
+def _enhance_small_template(tpl_gray, min_size=20):
+    h, w = tpl_gray.shape[:2]
+    if h < min_size or w < min_size:
+        scale = max(min_size / w, min_size / h, 1.0)
+        if scale > 1.0:
+            nw, nh = int(w * scale), int(h * scale)
+            tpl_gray = cv2.resize(tpl_gray, (nw, nh), interpolation=cv2.INTER_CUBIC)
+    return tpl_gray
+
+
+def locate_all(img_path: str, confidence: float) -> list:
     """Localiza coincidencias en pantalla.
 
     Intenta primero `pyautogui.locateAllOnScreen`; si no hay resultado y OpenCV está
     disponible realiza un matching multi-escala con `cv2.matchTemplate`.
+    Mejorado para detectar imágenes pequeñas con escalas agresivas.
     """
     try:
         if HAVE_CV2:
@@ -152,21 +163,27 @@ def locate_all(img_path: str, confidence: float) -> List[pyautogui.Box]:
         screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
 
         th, tw = tpl_gray.shape[:2]
+        is_small = tw < 32 or th < 32
+
+        tpl_enhanced = _enhance_small_template(tpl_gray, min_size=24)
+        eh, ew = tpl_enhanced.shape[:2]
+
         boxes = []
         scores = []
 
-        scales = np.linspace(0.7, 1.3, 7)
+        if is_small:
+            scales = np.linspace(0.3, 3.0, 25)
+        else:
+            scales = np.linspace(0.4, 2.2, 16)
+
         for scale in scales:
-            nw = int(tw * scale)
-            nh = int(th * scale)
+            nw = int(ew * scale)
+            nh = int(eh * scale)
             if nw < 8 or nh < 8 or nw > screen_w or nh > screen_h:
                 continue
             try:
-                tpl_resized = cv2.resize(
-                    tpl_gray,
-                    (nw, nh),
-                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
-                )
+                interp = cv2.INTER_CUBIC if scale > 1.2 else cv2.INTER_AREA if scale < 0.8 else cv2.INTER_LINEAR
+                tpl_resized = cv2.resize(tpl_enhanced, (nw, nh), interpolation=interp)
             except Exception:
                 continue
 
@@ -174,13 +191,18 @@ def locate_all(img_path: str, confidence: float) -> List[pyautogui.Box]:
             loc = np.where(res >= float(confidence))
             for py_y, px_x in zip(*loc):
                 score = float(res[py_y, px_x])
-                boxes.append((int(px_x), int(py_y), nw, nh))
+                scale_correction = ew / tw
+                orig_x = int(px_x / scale_correction) if is_small else px_x
+                orig_y = int(py_y / scale_correction) if is_small else py_y
+                orig_w = int(nw / scale_correction) if is_small else nw
+                orig_h = int(nh / scale_correction) if is_small else nh
+                boxes.append((orig_x, orig_y, orig_w, orig_h))
                 scores.append(score)
 
         if not boxes:
             return []
 
-        def _nms(boxes, scores, iou_thresh=0.3):
+        def _nms(boxes, scores, iou_thresh=0.25):
             x1 = np.array([b[0] for b in boxes], dtype=float)
             y1 = np.array([b[1] for b in boxes], dtype=float)
             x2 = x1 + np.array([b[2] for b in boxes], dtype=float)
@@ -206,7 +228,7 @@ def locate_all(img_path: str, confidence: float) -> List[pyautogui.Box]:
                 order = order[inds + 1]
             return keep
 
-        keep_idx = _nms(boxes, np.array(scores), iou_thresh=0.3)
+        keep_idx = _nms(boxes, np.array(scores), iou_thresh=0.25)
         filtered = [boxes[i] for i in keep_idx]
         return filtered
     except Exception as e:
